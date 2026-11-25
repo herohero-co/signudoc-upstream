@@ -3,13 +3,31 @@ import { redirect } from "next/navigation";
 import { connection } from "next/server";
 
 import { PublicDocumentShell } from "@/components/layout/public-document-shell";
-import { getSettings } from "@/lib/settings";
+import { ServiceConfigurationError } from "@/lib/services/service-config";
+import {
+  getSettings,
+  resolveSettings,
+  type ResolvedSettings,
+} from "@/lib/settings";
 import { STALE_DRAFT_RETENTION_DAYS } from "@/lib/retention";
+import { isHostedMode } from "@/lib/utils/env";
 
 export const metadata: Metadata = {
   description: "How your information is used when you sign a document here.",
   title: "Privacy notice for signers",
 };
+
+async function loadSignerPrivacySettings(): Promise<ResolvedSettings> {
+  try {
+    return await getSettings();
+  } catch (error) {
+    if (error instanceof ServiceConfigurationError) {
+      return resolveSettings(null);
+    }
+
+    throw error;
+  }
+}
 
 // A GDPR Article 13 notice for signers, built from the install's settings.
 // Shown in the footer when the organization has not linked its own privacy
@@ -17,7 +35,11 @@ export const metadata: Metadata = {
 export default async function SignerPrivacyPage() {
   await connection();
 
-  const settings = await getSettings();
+  if (isHostedMode()) {
+    redirect("/privacy");
+  }
+
+  const settings = await loadSignerPrivacySettings();
 
   if (settings.hosted) {
     redirect("/privacy");

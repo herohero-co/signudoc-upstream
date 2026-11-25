@@ -103,6 +103,24 @@ export async function clearFailedSignIns(
 }
 
 /**
+ * Whether this account has a password stored here (a Better Auth credential
+ * account with a non-empty password hash), as opposed to signing in only
+ * through an identity provider.
+ */
+export async function userHasPassword(
+  userId: string,
+  options: { database?: DbExecutor } = {},
+): Promise<boolean> {
+  const password = await queryOne<{ found: number }>(
+    options.database ?? getDb(),
+    `SELECT 1 AS found FROM account WHERE "userId" = $1 AND "providerId" = 'credential' AND password IS NOT NULL AND password <> '' LIMIT 1`,
+    [userId],
+  );
+
+  return password !== null;
+}
+
+/**
  * Whether this person must set up two-step sign-in before using the app.
  * `twoFactorEnabled` comes from the session, which is at most a few minutes
  * old; the setup itself replaces the session, so it is current right after.
@@ -126,13 +144,7 @@ export async function needsTwoFactorSetup(
     return true;
   }
 
-  const password = await queryOne<{ found: number }>(
-    options.database ?? getDb(),
-    `SELECT 1 AS found FROM account WHERE "userId" = $1 AND "providerId" = 'credential' LIMIT 1`,
-    [userId],
-  );
-
-  return password !== null;
+  return userHasPassword(userId, options);
 }
 
 /**

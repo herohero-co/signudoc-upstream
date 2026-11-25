@@ -1,9 +1,10 @@
 import type { Metadata } from "next";
-import Link from "next/link";
 
+import { LegalInlineText } from "@/components/layout/legal-inline-text";
 import { PublicDocumentShell } from "@/components/layout/public-document-shell";
 import { requireHostedMode } from "@/lib/hosted-pages";
-import { resolvePublicSupportAddress } from "@/lib/public-contact";
+import { buildLegalContactParts } from "@/lib/legal";
+import { findPublicSupportAddress } from "@/lib/public-contact";
 
 export const metadata: Metadata = {
   description:
@@ -14,7 +15,7 @@ export const metadata: Metadata = {
 export default async function TermsPage() {
   await requireHostedMode();
 
-  const supportAddress = await resolvePublicSupportAddress();
+  const supportAddress = await findPublicSupportAddress();
 
   return (
     <PublicDocumentShell
@@ -226,17 +227,12 @@ export default async function TermsPage() {
           security, fraud, or legal risk.
         </p>
         <p>
-          Account-closure requests may be submitted through the settings page or
-          by contacting{" "}
-          <Link
-            className="font-semibold text-(--accent-ink) underline decoration-[rgb(var(--accent-rgb)/0.35)] underline-offset-4"
-            href={`mailto:${supportAddress}`}
-          >
-            {supportAddress}
-          </Link>
-          . Before closing your account, download any documents you want to
-          keep. After closure, SignuDoc may provide a limited export window and
-          then delete stored document files and related envelope records, except
+          <LegalInlineText
+            parts={buildLegalContactParts("terms_closure", supportAddress)}
+          />{" "}
+          Before closing your account, download any documents you want to keep.
+          After closure, SignuDoc may provide a limited export window and then
+          delete stored document files and related envelope records, except
           limited information kept for security, fraud prevention, legal
           compliance, or dispute resolution.
         </p>
@@ -322,21 +318,9 @@ export default async function TermsPage() {
           14. Contact
         </h2>
         <p>
-          Questions about these Terms may be sent to{" "}
-          <Link
-            className="font-semibold text-(--accent-ink) underline decoration-[rgb(var(--accent-rgb)/0.35)] underline-offset-4"
-            href={`mailto:${supportAddress}`}
-          >
-            {supportAddress}
-          </Link>{" "}
-          or through the{" "}
-          <Link
-            className="font-semibold text-(--accent-ink) underline decoration-[rgb(var(--accent-rgb)/0.35)] underline-offset-4"
-            href="/contact"
-          >
-            Contact
-          </Link>{" "}
-          page.
+          <LegalInlineText
+            parts={buildLegalContactParts("terms_contact", supportAddress)}
+          />
         </p>
       </section>
     </PublicDocumentShell>

@@ -5,6 +5,7 @@ import { encode } from "uqr";
 
 import { useBranding } from "@/components/layout/branding-provider";
 import { FieldShell, ShellButton } from "@/components/shared/form-shell";
+import { describeTwoFactorPanel } from "@/lib/two-factor-view";
 
 // Two-step sign-in for the signed-in person: set it up with an
 // authenticator app, make new backup codes, or turn it off. The work is
@@ -44,6 +45,7 @@ function describeAuthError(payload: ApiPayload): string {
       return "That password is not right.";
     case "INVALID_CODE":
       return "That code is not right. Check the time on your phone and try the newest code.";
+    case "PASSWORD_REQUIRED_FOR_TWO_FACTOR":
     case "TWO_FACTOR_REQUIRED_BY_ADMINISTRATOR":
       return payload.message ?? GENERIC_ERROR_MESSAGE;
     default:
@@ -138,12 +140,23 @@ function BackupCodes({
 
 export function TwoFactorPanel({
   enabled,
+  hasPassword = true,
   required,
+  ssoProviderName = null,
 }: {
   enabled: boolean;
+  hasPassword?: boolean;
   required: boolean;
+  ssoProviderName?: string | null;
 }) {
   const { productName } = useBranding();
+  const view = describeTwoFactorPanel({
+    enabled,
+    hasPassword,
+    productName,
+    required,
+    ssoProviderName,
+  });
   const [step, setStep] = useState<Step>({ kind: "idle" });
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
@@ -151,6 +164,10 @@ export function TwoFactorPanel({
   const [isBusy, setIsBusy] = useState(false);
 
   function start(purpose: "disable" | "enable" | "codes") {
+    if (!view.canManage) {
+      return;
+    }
+
     setPassword("");
     setFeedback(null);
     setStep({ kind: "confirm-password", purpose });
@@ -166,7 +183,7 @@ export function TwoFactorPanel({
   async function handlePassword(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    if (isBusy || step.kind !== "confirm-password") {
+    if (!view.canManage || isBusy || step.kind !== "confirm-password") {
       return;
     }
 
@@ -237,7 +254,7 @@ export function TwoFactorPanel({
   async function handleCode(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    if (isBusy || step.kind !== "scan") {
+    if (!view.canManage || isBusy || step.kind !== "scan") {
       return;
     }
 
@@ -279,154 +296,175 @@ export function TwoFactorPanel({
           <h2 className="text-xl font-extrabold tracking-[-0.02em] text-(--fg)">
             Two-step sign-in
           </h2>
-          <span className={`pill ${enabled ? "pill-success" : "pill-neutral"}`}>
-            {enabled ? "On" : "Off"}
+          <span
+            className={`pill ${view.statusTone === "success" ? "pill-success" : "pill-neutral"}`}
+          >
+            {view.statusLabel}
           </span>
         </div>
         <p className="max-w-2xl text-sm leading-6 text-(--secondary)">
-          After your password, {productName} asks for a 6-digit code from an
-          authenticator app on your phone, such as 1Password, Google
-          Authenticator or Microsoft Authenticator. Someone who learns your
-          password still cannot sign in.
-          {required ? " Your organization requires it." : ""}
+          {view.description}
         </p>
 
-        {feedback ? (
-          <p
-            className={`notice ${feedback.tone === "success" ? "notice-success" : "notice-danger"}`}
-            role={feedback.tone === "error" ? "alert" : "status"}
-          >
-            {feedback.message}
-          </p>
-        ) : null}
+        {view.canManage ? (
+          <>
+            {feedback ? (
+              <p
+                className={`notice ${feedback.tone === "success" ? "notice-success" : "notice-danger"}`}
+                role={feedback.tone === "error" ? "alert" : "status"}
+              >
+                {feedback.message}
+              </p>
+            ) : null}
 
-        {step.kind === "idle" ? (
-          <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
-            {enabled ? (
-              <>
-                <ShellButton onClick={() => start("codes")} variant="secondary">
-                  Make new backup codes
-                </ShellButton>
-                {required ? null : (
+            {step.kind === "idle" ? (
+              <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
+                {enabled ? (
+                  <>
+                    <ShellButton
+                      onClick={() => start("codes")}
+                      variant="secondary"
+                    >
+                      Make new backup codes
+                    </ShellButton>
+                    {view.canDisable ? (
+                      <ShellButton
+                        onClick={() => start("disable")}
+                        variant="secondary"
+                      >
+                        Turn off two-step sign-in
+                      </ShellButton>
+                    ) : null}
+                  </>
+                ) : (
                   <ShellButton
-                    onClick={() => start("disable")}
-                    variant="secondary"
+                    className="w-fit"
+                    onClick={() => start("enable")}
                   >
-                    Turn off two-step sign-in
+                    Set up two-step sign-in
                   </ShellButton>
                 )}
-              </>
-            ) : (
-              <ShellButton className="w-fit" onClick={() => start("enable")}>
-                Set up two-step sign-in
-              </ShellButton>
-            )}
-          </div>
-        ) : null}
-
-        {step.kind === "confirm-password" ? (
-          <form className="space-y-4" noValidate onSubmit={handlePassword}>
-            <div className="max-w-sm">
-              <FieldShell
-                autoComplete="current-password"
-                disabled={isBusy}
-                label="Your password"
-                name="two-factor-password"
-                onChange={(event) => {
-                  setPassword(event.target.value);
-                  setFeedback(null);
-                }}
-                readOnly={false}
-                type="password"
-                value={password}
-              />
-            </div>
-            <div className="flex flex-col gap-3 sm:flex-row">
-              <ShellButton loading={isBusy} type="submit">
-                {step.purpose === "enable"
-                  ? "Continue"
-                  : step.purpose === "codes"
-                    ? "Make new codes"
-                    : "Turn off"}
-              </ShellButton>
-              <ShellButton
-                disabled={isBusy}
-                onClick={cancel}
-                variant="secondary"
-              >
-                Cancel
-              </ShellButton>
-            </div>
-          </form>
-        ) : null}
-
-        {step.kind === "scan" ? (
-          <div className="space-y-6">
-            <div className="flex flex-col gap-5 sm:flex-row sm:items-start">
-              <QrCode value={step.totpURI} />
-              <div className="space-y-2 text-sm leading-6 text-(--secondary)">
-                <p>
-                  <span className="font-semibold text-(--fg)">1.</span> Scan
-                  this code with your authenticator app.
-                </p>
-                <p>Or type in this key:</p>
-                <p className="font-mono text-(--fg)" data-testid="totp-secret">
-                  {groupSecret(readSecret(step.totpURI))}
-                </p>
               </div>
-            </div>
+            ) : null}
 
-            <div className="space-y-2">
-              <p className="text-sm font-semibold text-(--fg)">
-                2. Save your backup codes
-              </p>
-              <BackupCodes codes={step.backupCodes} productName={productName} />
-            </div>
+            {step.kind === "confirm-password" ? (
+              <form className="space-y-4" noValidate onSubmit={handlePassword}>
+                <div className="max-w-sm">
+                  <FieldShell
+                    autoComplete="current-password"
+                    disabled={isBusy}
+                    label="Your password"
+                    name="two-factor-password"
+                    onChange={(event) => {
+                      setPassword(event.target.value);
+                      setFeedback(null);
+                    }}
+                    readOnly={false}
+                    type="password"
+                    value={password}
+                  />
+                </div>
+                <div className="flex flex-col gap-3 sm:flex-row">
+                  <ShellButton loading={isBusy} type="submit">
+                    {step.purpose === "enable"
+                      ? "Continue"
+                      : step.purpose === "codes"
+                        ? "Make new codes"
+                        : "Turn off"}
+                  </ShellButton>
+                  <ShellButton
+                    disabled={isBusy}
+                    onClick={cancel}
+                    variant="secondary"
+                  >
+                    Cancel
+                  </ShellButton>
+                </div>
+              </form>
+            ) : null}
 
-            <form className="space-y-4" noValidate onSubmit={handleCode}>
-              <p className="text-sm font-semibold text-(--fg)">
-                3. Enter the code your app shows
-              </p>
-              <div className="max-w-xs">
-                <FieldShell
-                  autoComplete="one-time-code"
-                  disabled={isBusy}
-                  label="6-digit code"
-                  name="two-factor-setup-code"
-                  onChange={(event) => {
-                    setCode(event.target.value);
-                    setFeedback(null);
-                  }}
-                  readOnly={false}
-                  value={code}
+            {step.kind === "scan" ? (
+              <div className="space-y-6">
+                <div className="flex flex-col gap-5 sm:flex-row sm:items-start">
+                  <QrCode value={step.totpURI} />
+                  <div className="space-y-2 text-sm leading-6 text-(--secondary)">
+                    <p>
+                      <span className="font-semibold text-(--fg)">1.</span> Scan
+                      this code with your authenticator app.
+                    </p>
+                    <p>Or type in this key:</p>
+                    <p
+                      className="font-mono text-(--fg)"
+                      data-testid="totp-secret"
+                    >
+                      {groupSecret(readSecret(step.totpURI))}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <p className="text-sm font-semibold text-(--fg)">
+                    2. Save your backup codes
+                  </p>
+                  <BackupCodes
+                    codes={step.backupCodes}
+                    productName={productName}
+                  />
+                </div>
+
+                <form className="space-y-4" noValidate onSubmit={handleCode}>
+                  <p className="text-sm font-semibold text-(--fg)">
+                    3. Enter the code your app shows
+                  </p>
+                  <div className="max-w-xs">
+                    <FieldShell
+                      autoComplete="one-time-code"
+                      disabled={isBusy}
+                      label="6-digit code"
+                      name="two-factor-setup-code"
+                      onChange={(event) => {
+                        setCode(event.target.value);
+                        setFeedback(null);
+                      }}
+                      readOnly={false}
+                      value={code}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-3 sm:flex-row">
+                    <ShellButton loading={isBusy} type="submit">
+                      Turn on two-step sign-in
+                    </ShellButton>
+                    <ShellButton
+                      disabled={isBusy}
+                      onClick={cancel}
+                      variant="secondary"
+                    >
+                      Cancel
+                    </ShellButton>
+                  </div>
+                </form>
+              </div>
+            ) : null}
+
+            {step.kind === "new-codes" ? (
+              <div className="space-y-4">
+                <p className="notice notice-success" role="status">
+                  New backup codes made. The old ones no longer work.
+                </p>
+                <BackupCodes
+                  codes={step.backupCodes}
+                  productName={productName}
                 />
-              </div>
-              <div className="flex flex-col gap-3 sm:flex-row">
-                <ShellButton loading={isBusy} type="submit">
-                  Turn on two-step sign-in
-                </ShellButton>
                 <ShellButton
-                  disabled={isBusy}
+                  className="w-fit"
                   onClick={cancel}
                   variant="secondary"
                 >
-                  Cancel
+                  Done
                 </ShellButton>
               </div>
-            </form>
-          </div>
-        ) : null}
-
-        {step.kind === "new-codes" ? (
-          <div className="space-y-4">
-            <p className="notice notice-success" role="status">
-              New backup codes made. The old ones no longer work.
-            </p>
-            <BackupCodes codes={step.backupCodes} productName={productName} />
-            <ShellButton className="w-fit" onClick={cancel} variant="secondary">
-              Done
-            </ShellButton>
-          </div>
+            ) : null}
+          </>
         ) : null}
       </div>
     </div>

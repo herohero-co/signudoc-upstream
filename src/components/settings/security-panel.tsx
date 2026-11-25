@@ -346,10 +346,11 @@ export function SecurityPanel({
         <p className="max-w-2xl text-sm leading-6 text-(--secondary)">
           Two-step sign-in asks for a code from an authenticator app (such as
           1Password, Google Authenticator or Microsoft Authenticator) after the
-          password. When you require it, anyone who has not set it up is asked
-          to do so the next time they open the app, and can do nothing else
-          until they have. Ten wrong passwords for one email address stop
-          sign-in for it for 15 minutes either way.
+          password. When you require it, anyone with a password who has not set
+          it up is asked to do so the next time they open the app, and can do
+          nothing else until they have. Accounts that only use single sign-on
+          are managed by their identity provider instead. Ten wrong passwords
+          for one email address stop sign-in for it for 15 minutes either way.
         </p>
       </div>
 

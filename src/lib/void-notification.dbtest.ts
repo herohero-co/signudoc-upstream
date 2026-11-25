@@ -9,7 +9,7 @@ import { PDFDocument } from "pdf-lib";
 import type pg from "pg";
 
 import { openTestDatabase } from "./db/test-database.ts";
-import { voidSentEnvelope } from "./envelopes.ts";
+import { EnvelopeMutationError, voidSentEnvelope } from "./envelopes.ts";
 import { listAuditEventsForEnvelope } from "./services/audit.ts";
 import { issueSigningLink } from "./services/signing-links.ts";
 import {
@@ -239,4 +239,103 @@ test("voiding emails the current signer and those who already signed, not those 
 
   assert.equal(byId.get(signedSigner.id)?.status, "signed");
   assert.equal(byId.get(currentSigner.id)?.signing_token_hash, null);
+});
+
+test("voiding with no email provider is refused as a setup state and leaves the envelope sent (issue #225)", async () => {
+  const envelope = await createSentEnvelope([{ status: "notified" }]);
+  const [currentSigner] = envelope.signers;
+
+  assert.ok(currentSigner);
+
+  const tokenBefore = await database.query<{
+    signing_token_hash: string | null;
+  }>(`select signing_token_hash from signers where id = $1`, [
+    currentSigner.id,
+  ]);
+  const driverBefore = process.env.EMAIL_DRIVER;
+  const keyBefore = process.env.RESEND_API_KEY;
+
+  delete process.env.EMAIL_DRIVER;
+  delete process.env.RESEND_API_KEY;
+
+  try {
+    await assert.rejects(
+      voidSentEnvelope(
+        envelope.userId,
+        envelope.envelopeId,
+        { senderEmail: "sam@example.test", senderName: "Sam Sender" },
+        { database },
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof EnvelopeMutationError);
+        assert.equal(error.statusCode, 503);
+        assert.match(error.message, /Email is not set up yet/);
+        assert.match(error.message, /Settings, Organization/);
+        return true;
+      },
+    );
+  } finally {
+    if (driverBefore === undefined) {
+      delete process.env.EMAIL_DRIVER;
+    } else {
+      process.env.EMAIL_DRIVER = driverBefore;
+    }
+
+    if (keyBefore === undefined) {
+      delete process.env.RESEND_API_KEY;
+    } else {
+      process.env.RESEND_API_KEY = keyBefore;
+    }
+  }
+
+  const envelopeState = await database.query<{
+    status: string;
+    voided_at: number | null;
+  }>(`select status, voided_at from envelopes where id = $1`, [
+    envelope.envelopeId,
+  ]);
+
+  assert.equal(envelopeState.rows[0]?.status, "sent");
+  assert.equal(envelopeState.rows[0]?.voided_at, null);
+
+  const tokenAfter = await database.query<{
+    signing_token_hash: string | null;
+  }>(`select signing_token_hash from signers where id = $1`, [
+    currentSigner.id,
+  ]);
+
+  assert.equal(
+    tokenAfter.rows[0]?.signing_token_hash,
+    tokenBefore.rows[0]?.signing_token_hash,
+  );
+
+  const auditEvents = await listAuditEventsForEnvelope(
+    envelope.envelopeId,
+    database,
+  );
+
+  assert.equal(
+    auditEvents.filter((event) => event.event === "voided").length,
+    0,
+  );
+
+  // Once email is configured again, voiding succeeds and records voidedAt.
+  const voided = await voidSentEnvelope(
+    envelope.userId,
+    envelope.envelopeId,
+    { senderEmail: "sam@example.test", senderName: "Sam Sender" },
+    { database },
+  );
+
+  assert.ok(voided.voidedAt > 0);
+
+  const finalState = await database.query<{
+    status: string;
+    voided_at: number | null;
+  }>(`select status, voided_at from envelopes where id = $1`, [
+    envelope.envelopeId,
+  ]);
+
+  assert.equal(finalState.rows[0]?.status, "voided");
+  assert.equal(finalState.rows[0]?.voided_at, voided.voidedAt);
 });

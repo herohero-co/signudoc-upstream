@@ -1,9 +1,10 @@
 import type { Metadata } from "next";
-import Link from "next/link";
 
+import { LegalInlineText } from "@/components/layout/legal-inline-text";
 import { PublicDocumentShell } from "@/components/layout/public-document-shell";
 import { requireHostedMode } from "@/lib/hosted-pages";
-import { resolvePublicSupportAddress } from "@/lib/public-contact";
+import { buildLegalContactParts } from "@/lib/legal";
+import { findPublicSupportAddress } from "@/lib/public-contact";
 
 export const metadata: Metadata = {
   description:
@@ -14,7 +15,7 @@ export const metadata: Metadata = {
 export default async function PrivacyPage() {
   await requireHostedMode();
 
-  const privacyAddress = await resolvePublicSupportAddress();
+  const privacyAddress = await findPublicSupportAddress();
 
   return (
     <PublicDocumentShell
@@ -217,14 +218,9 @@ export default async function PrivacyPage() {
           9. How to exercise your rights
         </h2>
         <p>
-          To request access, correction, deletion, or account closure, email{" "}
-          <Link
-            className="font-semibold text-(--accent-ink) underline decoration-[rgb(var(--accent-rgb)/0.35)] underline-offset-4"
-            href={`mailto:${privacyAddress}`}
-          >
-            {privacyAddress}
-          </Link>{" "}
-          or use the in-app account-closure request flow when available.
+          <LegalInlineText
+            parts={buildLegalContactParts("privacy_rights", privacyAddress)}
+          />
         </p>
         <p>
           We may ask you to verify your identity before we act on a request. For
@@ -284,21 +280,9 @@ export default async function PrivacyPage() {
           unless a later date is stated.
         </p>
         <p>
-          Privacy questions, requests, and complaints may be sent to{" "}
-          <Link
-            className="font-semibold text-(--accent-ink) underline decoration-[rgb(var(--accent-rgb)/0.35)] underline-offset-4"
-            href={`mailto:${privacyAddress}`}
-          >
-            {privacyAddress}
-          </Link>{" "}
-          or through the{" "}
-          <Link
-            className="font-semibold text-(--accent-ink) underline decoration-[rgb(var(--accent-rgb)/0.35)] underline-offset-4"
-            href="/contact"
-          >
-            Contact
-          </Link>{" "}
-          page.
+          <LegalInlineText
+            parts={buildLegalContactParts("privacy_contact", privacyAddress)}
+          />
         </p>
       </section>
     </PublicDocumentShell>

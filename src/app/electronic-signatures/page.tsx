@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { connection } from "next/server";
 
 import { PublicDocumentShell } from "@/components/layout/public-document-shell";
+import { buildBranding } from "@/lib/branding";
 import {
   EU_LIMITS,
   PERMITTED_USE_VERSION,
@@ -9,7 +10,7 @@ import {
   WHAT_IT_IS,
   WHAT_IT_IS_NOT,
 } from "@/lib/permitted-uses";
-import { getBranding } from "@/lib/settings";
+import { getBranding, resolveSettings } from "@/lib/settings";
 
 export const metadata: Metadata = {
   description:
@@ -27,12 +28,20 @@ function List({ items }: { items: string[] }) {
   );
 }
 
+async function loadProductName(): Promise<string> {
+  try {
+    return (await getBranding()).productName;
+  } catch {
+    return buildBranding(resolveSettings(null)).productName;
+  }
+}
+
 // On every install, hosted or not: senders confirm this list before each
 // send, and signers can read it.
 export default async function ElectronicSignaturesPage() {
   await connection();
 
-  const { productName } = await getBranding();
+  const productName = await loadProductName();
 
   return (
     <PublicDocumentShell

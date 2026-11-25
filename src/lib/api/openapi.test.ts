@@ -89,3 +89,18 @@ test("the OpenAPI description gives this install's signer limit", () => {
   );
   assert.equal(fromTemplate.maxItems, 40);
 });
+
+test("the OpenAPI description documents 503 for routes that email signers", () => {
+  const document = buildOpenApiDocument("https://sign.example.com/api/v1");
+
+  for (const pathKey of [
+    "/envelopes/{id}/send",
+    "/envelopes/{id}/remind",
+    "/envelopes/{id}/void",
+  ] as const) {
+    assert.ok(
+      "503" in document.paths[pathKey].post.responses,
+      `${pathKey} should document 503 when email is unconfigured`,
+    );
+  }
+});

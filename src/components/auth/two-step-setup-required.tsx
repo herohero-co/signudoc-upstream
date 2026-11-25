@@ -38,7 +38,7 @@ export function TwoStepSetupRequired({ email }: { email: string }) {
         </p>
       </section>
 
-      <TwoFactorPanel enabled={false} required />
+      <TwoFactorPanel enabled={false} hasPassword required />
 
       <ShellButton
         className="w-fit"

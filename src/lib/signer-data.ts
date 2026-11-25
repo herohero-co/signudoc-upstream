@@ -7,6 +7,7 @@ import {
 } from "./db/connection.ts";
 import { deleteEnvelopesAndFiles } from "./retention.ts";
 import { emailSchema } from "./schemas/common.ts";
+import { isMissingSchemaError } from "./settings.ts";
 
 // What an administrator needs to answer a signer who asks for their data
 // (GDPR Articles 15 and 20) or for it to be erased (Article 17).
@@ -39,9 +40,156 @@ type SignerEnvelopeRow = {
   signerId: string;
   signerName: string;
   signerStatus: string;
-  /** "signer", or "cc" for someone who only received a copy. */
+  /** "signer", "approver", or "cc" for someone who only received a copy. */
   role: string;
 };
+
+export type SignerWebhookPayload = {
+  copyRecipients?: Record<string, unknown>[];
+  envelopeStatus?: string;
+  envelopeTitle?: string;
+  reason?: string;
+  signer?: Record<string, unknown>;
+  signers?: Record<string, unknown>[];
+  timestamp?: string;
+  type?: string;
+};
+
+export type SignerWebhookDeliveryRow = {
+  createdAt: number;
+  deliveredAt: number | null;
+  endpointId: string;
+  envelopeId: string | null;
+  eventType: string;
+  id: string;
+  /**
+   * The parts of the stored JSON payload that belong to this signer, or null
+   * when a pending delivery has not built its payload yet.
+   */
+  payload: SignerWebhookPayload | null;
+  status: string;
+};
+
+type StoredWebhookDeliveryRow = {
+  createdAt: number;
+  deliveredAt: number | null;
+  endpointId: string;
+  envelopeId: string | null;
+  eventType: string;
+  id: string;
+  payload: string | null;
+  status: string;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function recordMatchesEmail(
+  record: Record<string, unknown>,
+  normalizedEmail: string,
+): boolean {
+  return (
+    typeof record.email === "string" &&
+    record.email.trim().toLowerCase() === normalizedEmail
+  );
+}
+
+/**
+ * Checks whether a stored webhook delivery payload names `rawEmail` as a
+ * signer, approver or copy recipient, and returns only that person's own
+ * portions of the payload (leaving out other parties, owner details and
+ * internal envelope metadata).
+ */
+export function extractSignerWebhookPayload(
+  rawPayload: string | null,
+  rawEmail: string,
+): { matched: boolean; payload: SignerWebhookPayload | null } {
+  if (rawPayload === null) {
+    return { matched: false, payload: null };
+  }
+
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(rawPayload);
+  } catch {
+    return { matched: false, payload: null };
+  }
+
+  if (!isRecord(parsed) || !isRecord(parsed.data)) {
+    return { matched: false, payload: null };
+  }
+
+  const normalizedEmail = rawEmail.trim().toLowerCase();
+  const data = parsed.data;
+  const envelope = isRecord(data.envelope) ? data.envelope : null;
+  const matchingSigners = Array.isArray(envelope?.signers)
+    ? envelope.signers.filter(
+        (entry): entry is Record<string, unknown> =>
+          isRecord(entry) && recordMatchesEmail(entry, normalizedEmail),
+      )
+    : [];
+  const matchingCopyRecipients = Array.isArray(envelope?.copyRecipients)
+    ? envelope.copyRecipients.filter(
+        (entry): entry is Record<string, unknown> =>
+          isRecord(entry) && recordMatchesEmail(entry, normalizedEmail),
+      )
+    : [];
+  const matchingSigner =
+    isRecord(data.signer) && recordMatchesEmail(data.signer, normalizedEmail)
+      ? data.signer
+      : undefined;
+
+  if (
+    matchingSigners.length === 0 &&
+    matchingCopyRecipients.length === 0 &&
+    !matchingSigner
+  ) {
+    return { matched: false, payload: null };
+  }
+
+  const payload: SignerWebhookPayload = {};
+
+  if (typeof parsed.type === "string") {
+    payload.type = parsed.type;
+  }
+
+  if (typeof parsed.timestamp === "string") {
+    payload.timestamp = parsed.timestamp;
+  }
+
+  if (typeof envelope?.title === "string") {
+    payload.envelopeTitle = envelope.title;
+  }
+
+  if (typeof envelope?.status === "string") {
+    payload.envelopeStatus = envelope.status;
+  }
+
+  if (matchingSigners.length > 0) {
+    payload.signers = matchingSigners;
+  }
+
+  if (matchingCopyRecipients.length > 0) {
+    payload.copyRecipients = matchingCopyRecipients;
+  }
+
+  if (matchingSigner) {
+    payload.signer = matchingSigner;
+  }
+
+  if (
+    parsed.type === "envelope.declined" &&
+    matchingSigner &&
+    typeof data.reason === "string" &&
+    data.reason.length > 0
+  ) {
+    payload.reason = data.reason;
+  }
+
+  return { matched: true, payload };
+}
 
 function parseEmail(email: unknown): string {
   const parsed = emailSchema.safeParse(email);
@@ -83,6 +231,185 @@ async function listSignerEnvelopes(
   );
 }
 
+/**
+ * Stored webhook deliveries the install holds for this signer: pending ones
+ * queued for their envelopes, and any delivery whose stored JSON payload names
+ * them (including deliveries whose envelope was deleted earlier).
+ */
+async function listSignerWebhookDeliveries(
+  email: string,
+  envelopeIds: readonly string[],
+  database: DbExecutor,
+): Promise<SignerWebhookDeliveryRow[]> {
+  let rows: StoredWebhookDeliveryRow[];
+
+  try {
+    rows = await queryMany<StoredWebhookDeliveryRow>(
+      database,
+      `
+        SELECT
+          id,
+          endpoint_id AS "endpointId",
+          envelope_id AS "envelopeId",
+          event_type AS "eventType",
+          status,
+          payload,
+          created_at AS "createdAt",
+          delivered_at AS "deliveredAt"
+        FROM webhook_deliveries
+        WHERE event_type <> 'webhook.test'
+          AND (
+            envelope_id = ANY($1::text[])
+            OR (payload IS NOT NULL AND strpos(lower(payload), $2) > 0)
+          )
+        ORDER BY created_at ASC, id ASC
+      `,
+      [envelopeIds, email],
+    );
+  } catch (error) {
+    if (isMissingSchemaError(error)) {
+      return [];
+    }
+
+    throw error;
+  }
+
+  const signerEnvelopeIds = new Set(envelopeIds);
+  const deliveries: SignerWebhookDeliveryRow[] = [];
+
+  for (const row of rows) {
+    if (row.payload === null) {
+      if (row.envelopeId !== null && signerEnvelopeIds.has(row.envelopeId)) {
+        deliveries.push({
+          createdAt: row.createdAt,
+          deliveredAt: row.deliveredAt,
+          endpointId: row.endpointId,
+          envelopeId: row.envelopeId,
+          eventType: row.eventType,
+          id: row.id,
+          payload: null,
+          status: row.status,
+        });
+      }
+
+      continue;
+    }
+
+    const extracted = extractSignerWebhookPayload(row.payload, email);
+
+    if (extracted.matched) {
+      deliveries.push({
+        createdAt: row.createdAt,
+        deliveredAt: row.deliveredAt,
+        endpointId: row.endpointId,
+        envelopeId: row.envelopeId,
+        eventType: row.eventType,
+        id: row.id,
+        payload: extracted.payload,
+        status: row.status,
+      });
+    }
+  }
+
+  return deliveries;
+}
+
+/**
+ * Deletes stored webhook deliveries for erased envelopes (including pending
+ * retries so stale signer data is never sent later) as well as deliveries whose
+ * stored payload names this signer for already-deleted envelopes or non-Part-11
+ * envelopes they are no longer on. Active and Part 11 envelopes stay intact.
+ */
+async function deleteSignerWebhookDeliveries(
+  email: string,
+  erasedEnvelopeIds: readonly string[],
+  database: DbExecutor,
+  options?: { inTransaction?: boolean },
+): Promise<number> {
+  const useSavepoint = options?.inTransaction === true;
+
+  if (useSavepoint) {
+    await database.query("SAVEPOINT signer_webhook_cleanup");
+  }
+
+  try {
+    const candidates = await queryMany<{ id: string; payload: string }>(
+      database,
+      `
+        SELECT wd.id, wd.payload
+        FROM webhook_deliveries wd
+        WHERE wd.event_type <> 'webhook.test'
+          AND wd.payload IS NOT NULL
+          AND strpos(lower(wd.payload), $1) > 0
+          AND NOT EXISTS (
+            SELECT 1 FROM envelopes e
+            WHERE e.id = wd.envelope_id AND e.part11
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM envelopes e
+            JOIN signers s ON s.envelope_id = e.id
+            WHERE e.id = wd.envelope_id AND lower(s.email) = $1
+          )
+      `,
+      [email],
+    );
+    const matchingPayloadIds = candidates
+      .filter((row) => extractSignerWebhookPayload(row.payload, email).matched)
+      .map((row) => row.id);
+
+    if (erasedEnvelopeIds.length === 0 && matchingPayloadIds.length === 0) {
+      if (useSavepoint) {
+        await database.query("RELEASE SAVEPOINT signer_webhook_cleanup");
+      }
+
+      return 0;
+    }
+
+    const deleted = await database.query(
+      `
+        DELETE FROM webhook_deliveries
+        WHERE (
+          webhook_deliveries.envelope_id = ANY($1::text[])
+          AND NOT EXISTS (
+            SELECT 1 FROM envelopes e
+            WHERE e.id = webhook_deliveries.envelope_id
+          )
+        )
+        OR (
+          webhook_deliveries.id = ANY($2::text[])
+          AND NOT EXISTS (
+            SELECT 1 FROM envelopes e
+            WHERE e.id = webhook_deliveries.envelope_id AND e.part11
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM envelopes e
+            JOIN signers s ON s.envelope_id = e.id
+            WHERE e.id = webhook_deliveries.envelope_id AND lower(s.email) = $3
+          )
+        )
+      `,
+      [erasedEnvelopeIds, matchingPayloadIds, email],
+    );
+
+    if (useSavepoint) {
+      await database.query("RELEASE SAVEPOINT signer_webhook_cleanup");
+    }
+
+    return deleted.rowCount ?? 0;
+  } catch (error) {
+    if (isMissingSchemaError(error)) {
+      if (useSavepoint) {
+        await database.query("ROLLBACK TO SAVEPOINT signer_webhook_cleanup");
+        await database.query("RELEASE SAVEPOINT signer_webhook_cleanup");
+      }
+
+      return 0;
+    }
+
+    throw error;
+  }
+}
+
 export type SignerDataExport = {
   auditEvents: Record<string, unknown>[];
   email: string;
@@ -90,6 +417,7 @@ export type SignerDataExport = {
   exportedAt: string;
   fields: Record<string, unknown>[];
   note: string;
+  webhookDeliveries: SignerWebhookDeliveryRow[];
 };
 
 /** Everything stored about one signer email, as JSON. */
@@ -101,7 +429,7 @@ export async function exportSignerData(
   const envelopes = await listSignerEnvelopes(email, database);
   const signerIds = envelopes.map((row) => row.signerId);
   const envelopeIds = envelopes.map((row) => row.envelopeId);
-  const [fields, auditEvents] = await Promise.all([
+  const [fields, auditEvents, webhookDeliveries] = await Promise.all([
     queryMany<Record<string, unknown>>(
       database,
       `
@@ -139,6 +467,7 @@ export async function exportSignerData(
       `,
       [envelopeIds, email, signerIds],
     ),
+    listSignerWebhookDeliveries(email, envelopeIds, database),
   ]);
 
   return {
@@ -148,11 +477,14 @@ export async function exportSignerData(
     exportedAt: new Date().toISOString(),
     fields,
     note: "Signed PDFs and audit certificates are not included here. Download them from each envelope, or ask the sender.",
+    webhookDeliveries,
   };
 }
 
 export type SignerErasureResult = {
   deletedEnvelopes: number;
+  /** Stored webhook deliveries deleted for this signer, when any were removed. */
+  deletedWebhookDeliveries?: number;
   /** Part 11 records, which an erasure request does not delete. */
   keptPart11: { id: string; title: string }[];
   removedFromDrafts: number;
@@ -161,8 +493,9 @@ export type SignerErasureResult = {
 
 /**
  * Erases one signer email: drops them from drafts and deletes every
- * finished envelope they took part in, with its files and audit trail.
- * The caller must have confirmed that no law requires those records kept.
+ * finished envelope they took part in, with its files, audit trail and
+ * stored webhook deliveries. The caller must have confirmed that no law
+ * requires those records kept.
  */
 export async function eraseSignerData(
   rawEmail: unknown,
@@ -248,13 +581,44 @@ export async function eraseSignerData(
     [[...new Set(envelopes.map((row) => row.envelopeId))]],
   );
 
-  const deletedEnvelopes = await deleteEnvelopesAndFiles(
-    [...new Set(finished.map((row) => row.envelopeId))],
-    database,
-  );
+  const finishedEnvelopeIds = [
+    ...new Set(finished.map((row) => row.envelopeId)),
+  ];
+  let deletedWebhookDeliveries = 0;
+  // webhook_deliveries has no foreign key to envelopes, so delete both in the
+  // same transaction when removing finished envelopes. An interruption or DB
+  // error therefore rolls back both deletions instead of leaving webhook
+  // payloads orphaned behind already-deleted envelopes.
+  const deletedEnvelopes =
+    finishedEnvelopeIds.length > 0
+      ? await deleteEnvelopesAndFiles(
+          finishedEnvelopeIds,
+          database,
+          undefined,
+          {
+            afterDeleteRows: async (tx) => {
+              deletedWebhookDeliveries = await deleteSignerWebhookDeliveries(
+                email,
+                finishedEnvelopeIds,
+                tx,
+                { inTransaction: true },
+              );
+            },
+          },
+        )
+      : 0;
+
+  if (finishedEnvelopeIds.length === 0) {
+    deletedWebhookDeliveries = await deleteSignerWebhookDeliveries(
+      email,
+      [],
+      database,
+    );
+  }
 
   return {
     deletedEnvelopes,
+    ...(deletedWebhookDeliveries > 0 ? { deletedWebhookDeliveries } : {}),
     keptPart11: keptPart11.map((row) => ({
       id: row.envelopeId,
       title: row.envelopeTitle,

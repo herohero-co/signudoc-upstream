@@ -21,6 +21,7 @@ import {
   resetTwoFactor,
   setTwoFactorRequirement,
   SignInSecurityError,
+  userHasPassword,
 } from "./sign-in-security.ts";
 
 // Sign-in security against a real Postgres and the real Better Auth
@@ -705,4 +706,32 @@ test("confirming an authenticator with a leftover challenge cookie is recorded a
   assert.equal(verified.status, 200, JSON.stringify(verified.payload));
   assert.equal((await events("two_factor_enabled"))[0]?.actorUserId, userId);
   assert.equal((await events("sign_in_succeeded")).length, before);
+});
+
+test("userHasPassword checks for a non-empty credential hash, and an SSO-only admin can require two-step sign-in", async () => {
+  const passwordUserId = await createVerifiedUser("pat@acme.com");
+  const ssoAdminId = randomUUID();
+
+  await database.query(
+    `insert into "user" (id, name, email, "emailVerified", role) values ($1, 'Sso Admin', 'sso-admin@acme.com', true, 'admin')`,
+    [ssoAdminId],
+  );
+  await database.query(
+    `insert into account (id, "accountId", "providerId", "userId", password) values ($1, 'oidc-sub', 'sso', $2, null)`,
+    [randomUUID(), ssoAdminId],
+  );
+
+  assert.equal(await userHasPassword(passwordUserId, { database }), true);
+  assert.equal(await userHasPassword(ssoAdminId, { database }), false);
+
+  await setTwoFactorRequirement(
+    { email: "sso-admin@acme.com", userId: ssoAdminId },
+    true,
+    database,
+  );
+
+  const [changed] = await events("two_factor_requirement_changed");
+
+  assert.equal(changed?.actorUserId, ssoAdminId);
+  assert.deepEqual(changed?.metadata, { from: false, to: true });
 });

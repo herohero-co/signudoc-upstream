@@ -14,7 +14,11 @@ import { openTestDatabase } from "../db/test-database.ts";
 import { clearRateLimitStoreForTests } from "../security/rate-limit.ts";
 import { listSystemAuditEvents } from "../services/system-audit.ts";
 import { invalidateSettingsCache, saveSettings } from "../settings.ts";
-import { needsTwoFactorSetup } from "../sign-in-security.ts";
+import {
+  needsTwoFactorSetup,
+  setTwoFactorRequirement,
+  userHasPassword,
+} from "../sign-in-security.ts";
 
 // Single sign-on against a real Postgres, the real Better Auth endpoints and
 // a small OpenID Connect provider run here: discovery, signed ID tokens and
@@ -590,22 +594,96 @@ test("requiring two-step sign-in does not hold up someone who only uses single s
   const user = await sessionUser(auth, cookies);
 
   assert.ok(user);
+  assert.equal(await userHasPassword(user.id, { database }), false);
   assert.equal(
     await needsTwoFactorSetup({ requireTwoFactor: true }, user, { database }),
     false,
   );
 
-  // Someone with a password still has to set it up.
+  // Calling the password-based two-step endpoints directly explains why
+  // instead of returning a misleading INVALID_PASSWORD error.
+  const enableAttempt = await post(
+    auth,
+    "/two-factor/enable",
+    { issuer: "Acme Sign", password: PASSWORD },
+    cookies,
+  );
+
+  assert.equal(enableAttempt.status, 400);
+  assert.equal(enableAttempt.payload?.code, "PASSWORD_REQUIRED_FOR_TWO_FACTOR");
+
+  const codesAttempt = await post(
+    auth,
+    "/two-factor/generate-backup-codes",
+    { password: PASSWORD },
+    cookies,
+  );
+
+  assert.equal(codesAttempt.status, 400);
+  assert.equal(codesAttempt.payload?.code, "PASSWORD_REQUIRED_FOR_TWO_FACTOR");
+
+  // An SSO-only administrator can require two-step sign-in for password
+  // accounts without being told to set it up on their own passwordless account.
+  await database.query(`update "user" set role = 'admin' where id = $1`, [
+    user.id,
+  ]);
+  await setTwoFactorRequirement(
+    { email: user.email, userId: user.id },
+    true,
+    database,
+  );
+  invalidateSettingsCache();
+
+  const disableAttempt = await post(
+    auth,
+    "/two-factor/disable",
+    { password: PASSWORD },
+    cookies,
+  );
+
+  assert.equal(disableAttempt.status, 400);
+  assert.equal(
+    disableAttempt.payload?.code,
+    "PASSWORD_REQUIRED_FOR_TWO_FACTOR",
+  );
+
+  // A credential row with a NULL password does not count as having a password.
+  const emptyCredId = randomUUID();
+
+  await database.query(
+    `insert into account (id, "accountId", "providerId", "userId", password) values ($1, $2, 'credential', $2, null)`,
+    [emptyCredId, user.id],
+  );
+  assert.equal(await userHasPassword(user.id, { database }), false);
+  assert.equal(
+    await needsTwoFactorSetup({ requireTwoFactor: true }, user, { database }),
+    false,
+  );
+  await database.query(`delete from account where id = $1`, [emptyCredId]);
+
+  // Someone with BOTH SSO and a password still has to set it up, and can.
   const context = await auth.$context;
 
   await database.query(
     `insert into account (id, "accountId", "providerId", "userId", password) values ($1, $2, 'credential', $2, $3)`,
     [randomUUID(), user.id, await context.password.hash(PASSWORD)],
   );
+  assert.equal(await userHasPassword(user.id, { database }), true);
   assert.equal(
     await needsTwoFactorSetup({ requireTwoFactor: true }, user, { database }),
     true,
   );
+
+  const hybridEnable = await post(
+    auth,
+    "/two-factor/enable",
+    { issuer: "Acme Sign", password: PASSWORD },
+    cookies,
+  );
+
+  assert.equal(hybridEnable.status, 200, JSON.stringify(hybridEnable.payload));
+  assert.ok(typeof hybridEnable.payload?.totpURI === "string");
+  assert.equal((hybridEnable.payload?.backupCodes as string[])?.length, 10);
 });
 
 test("an ID token posted straight to the sign-in route is refused, not signed in unaudited", async () => {

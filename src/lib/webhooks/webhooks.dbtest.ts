@@ -20,6 +20,7 @@ import { getApiEnvelopeWithOwner } from "../api/envelope-view.ts";
 import { withTransaction } from "../db/connection.ts";
 import { openTestDatabase, waitUntilBlockedBy } from "../db/test-database.ts";
 import { recordAuditEvent } from "../services/audit.ts";
+import { eraseSignerData, exportSignerData } from "../signer-data.ts";
 import { issueSigningLink } from "../services/signing-links.ts";
 import { getSigningPayloadForToken } from "../signing.ts";
 import {
@@ -1070,4 +1071,392 @@ test("two first openings at once record one view and queue one signer.viewed", a
 
   assert.equal(views.rows[0]?.count, 1);
   assert.equal((await deliveriesFor(endpoint.endpoint.id)).length, 1);
+});
+
+test("signer export includes stored webhook deliveries, and erasure removes finished deliveries and pending retries while keeping active, Part 11 and unrelated records", async () => {
+  const admin = await createAdmin();
+  const { endpoint } = await addEndpoint(admin, [
+    "envelope.sent",
+    "envelope.completed",
+    "envelope.voided",
+  ]);
+  const signerEmail = `erased-${randomUUID()}@example.test`;
+  const controlEmail = `control-${randomUUID()}@example.test`;
+
+  const makeEnvelope = (email: string, name: string, title: string) =>
+    createEnvelopeForApi(
+      admin,
+      apiCreateEnvelopeSchema.parse({
+        fields: [
+          {
+            height: 0.05,
+            page: 1,
+            signer: "primary",
+            type: "signature",
+            width: 0.3,
+            x: 0.1,
+            y: 0.8,
+          },
+        ],
+        signers: [{ email, name, ref: "primary" }],
+        title,
+        send: { permittedUseConfirmed: true },
+      }),
+      { body: pdf, contentType: "application/pdf", filename: "a.pdf" },
+      database,
+    );
+
+  // 1. Finished non-Part-11 envelope (with a delivered webhook, a retrying
+  //    webhook, and an untried pending webhook).
+  const finished = await makeEnvelope(
+    signerEmail,
+    "Alice Erased",
+    "Finished NDA",
+  );
+
+  await drainWebhookDeliveries({ database, env });
+  await database.query(
+    `update envelopes set status = 'completed', completed_at = 2 where id = $1`,
+    [finished.id],
+  );
+  // Queue a retrying completed delivery (fails with 503 on first try).
+  await recordAuditEvent(
+    { actorType: "system", envelopeId: finished.id, event: "completed" },
+    database,
+  );
+  answer = () => 503;
+  await drainWebhookDeliveries({ database, env });
+
+  // 2. Active (sent) envelope for the same signer — must stay intact.
+  answer = () => 200;
+  const active = await makeEnvelope(
+    signerEmail,
+    "Alice Erased",
+    "Active agreement",
+  );
+
+  // 3. Part 11 finished envelope for the same signer — must stay intact.
+  const part11 = await makeEnvelope(
+    signerEmail,
+    "Alice Erased",
+    "Part 11 record",
+  );
+
+  await database.query(
+    `update envelopes set status = 'completed', completed_at = 3, part11 = true where id = $1`,
+    [part11.id],
+  );
+  await recordAuditEvent(
+    { actorType: "system", envelopeId: part11.id, event: "completed" },
+    database,
+  );
+
+  // 4. Unrelated control signer's finished envelope — must stay intact.
+  const control = await makeEnvelope(
+    controlEmail,
+    "Control Signer",
+    "Control contract",
+  );
+
+  await database.query(
+    `update envelopes set status = 'completed', completed_at = 4 where id = $1`,
+    [control.id],
+  );
+  await drainWebhookDeliveries({ database, env });
+
+  // Queue an untried pending delivery (payload IS NULL) for finished.id after
+  // the drain above, and make the retrying delivery due now so draining after
+  // erasure proves neither retrying nor untried deliveries can go out.
+  await recordAuditEvent(
+    { actorType: "sender", envelopeId: finished.id, event: "voided" },
+    database,
+  );
+  await database.query(
+    `update webhook_deliveries set next_attempt_at = 0 where envelope_id = $1 and status = 'pending'`,
+    [finished.id],
+  );
+
+  // Export before erasure includes deliveries for finished, active and Part 11
+  // envelopes, and never includes the control signer's deliveries.
+  const beforeExport = await exportSignerData(
+    signerEmail.toUpperCase(),
+    database,
+  );
+
+  assert.equal(beforeExport.envelopes.length, 3);
+  assert.ok(
+    beforeExport.webhookDeliveries.some(
+      (delivery) =>
+        delivery.envelopeId === finished.id &&
+        delivery.status === "delivered" &&
+        JSON.stringify(delivery.payload).includes(signerEmail),
+    ),
+  );
+  assert.ok(
+    beforeExport.webhookDeliveries.some(
+      (delivery) =>
+        delivery.envelopeId === finished.id &&
+        delivery.status === "pending" &&
+        delivery.payload !== null &&
+        JSON.stringify(delivery.payload).includes(signerEmail),
+    ),
+  );
+  assert.ok(
+    beforeExport.webhookDeliveries.some(
+      (delivery) =>
+        delivery.envelopeId === finished.id &&
+        delivery.status === "pending" &&
+        delivery.payload === null,
+    ),
+  );
+  assert.equal(
+    beforeExport.webhookDeliveries.some(
+      (delivery) => delivery.envelopeId === control.id,
+    ),
+    false,
+  );
+
+  const finishedDeliveryIds = (
+    await database.query<{ id: string }>(
+      `select id from webhook_deliveries where envelope_id = $1`,
+      [finished.id],
+    )
+  ).rows.map((row) => row.id);
+
+  assert.equal(finishedDeliveryIds.length, 3);
+
+  // Erase the signer.
+  const result = await eraseSignerData(signerEmail, signerEmail, database);
+
+  assert.equal(result.deletedEnvelopes, 1);
+  assert.equal(result.deletedWebhookDeliveries, 3);
+  assert.deepEqual(
+    result.skippedInProgress.map((row) => row.id),
+    [active.id],
+  );
+  assert.deepEqual(
+    result.keptPart11.map((row) => row.id),
+    [part11.id],
+  );
+
+  // Zero webhook deliveries remain for the erased envelope, resending fails,
+  // and draining does not send stale retries.
+  const erasedRemaining = await database.query(
+    `select id from webhook_deliveries where envelope_id = $1`,
+    [finished.id],
+  );
+
+  assert.equal(erasedRemaining.rowCount, 0);
+  assert.equal(
+    await resendWebhookDelivery(finishedDeliveryIds[0]!, database),
+    false,
+  );
+  assert.equal(
+    (await deliveriesFor(endpoint.id)).some((row) =>
+      finishedDeliveryIds.includes(row.id),
+    ),
+    false,
+  );
+
+  const receivedBeforeDrain = received.length;
+  const drainAfter = await drainWebhookDeliveries({ database, env });
+
+  assert.deepEqual(drainAfter, {
+    delivered: 0,
+    dropped: 0,
+    failed: 0,
+    skipped: 0,
+  });
+  assert.equal(received.length, receivedBeforeDrain);
+
+  // Active, Part 11 and control envelopes and their deliveries stay intact.
+  const afterExport = await exportSignerData(signerEmail, database);
+
+  assert.deepEqual(
+    afterExport.envelopes.map((row) => row.envelopeId).sort(),
+    [active.id, part11.id].sort(),
+  );
+  assert.equal(
+    afterExport.webhookDeliveries.some(
+      (delivery) => delivery.envelopeId === finished.id,
+    ),
+    false,
+  );
+  assert.ok(
+    afterExport.webhookDeliveries.some(
+      (delivery) => delivery.envelopeId === active.id,
+    ),
+  );
+  assert.ok(
+    afterExport.webhookDeliveries.some(
+      (delivery) => delivery.envelopeId === part11.id,
+    ),
+  );
+
+  const controlExport = await exportSignerData(controlEmail, database);
+
+  assert.equal(controlExport.envelopes.length, 1);
+  assert.equal(controlExport.webhookDeliveries.length, 1);
+});
+
+test("multi-signer webhook export isolates parties and erasure cleans up orphaned and corrected payloads", async () => {
+  const admin = await createAdmin();
+  const { endpoint } = await addEndpoint(admin, [
+    "envelope.sent",
+    "envelope.completed",
+  ]);
+  const aliceEmail = `alice-${randomUUID()}@example.test`;
+  const bobEmail = `bob-${randomUUID()}@example.test`;
+  const copyEmail = `copy-${randomUUID()}@example.test`;
+
+  const shared = await createEnvelopeForApi(
+    admin,
+    apiCreateEnvelopeSchema.parse({
+      copyRecipients: [{ email: copyEmail, name: "Copy Person" }],
+      fields: [
+        {
+          height: 0.05,
+          page: 1,
+          signer: "alice",
+          type: "signature",
+          width: 0.3,
+          x: 0.1,
+          y: 0.8,
+        },
+        {
+          height: 0.05,
+          page: 1,
+          signer: "bob",
+          type: "signature",
+          width: 0.3,
+          x: 0.5,
+          y: 0.8,
+        },
+      ],
+      signers: [
+        { email: aliceEmail, name: "Alice Signer", ref: "alice" },
+        { email: bobEmail, name: "Bob Co-Signer", ref: "bob" },
+      ],
+      title: "Shared contract",
+      send: { permittedUseConfirmed: true },
+    }),
+    { body: pdf, contentType: "application/pdf", filename: "a.pdf" },
+    database,
+  );
+
+  const bobSeparate = await createEnvelopeForApi(
+    admin,
+    apiCreateEnvelopeSchema.parse({
+      fields: [
+        {
+          height: 0.05,
+          page: 1,
+          signer: "bob",
+          type: "signature",
+          width: 0.3,
+          x: 0.1,
+          y: 0.8,
+        },
+      ],
+      signers: [{ email: bobEmail, name: "Bob Approver", ref: "bob" }],
+      title: "Bob own contract",
+      send: { permittedUseConfirmed: true },
+    }),
+    { body: pdf, contentType: "application/pdf", filename: "b.pdf" },
+    database,
+  );
+
+  await drainWebhookDeliveries({ database, env });
+
+  // Export for Alice does not leak Bob or the copy recipient.
+  const aliceExport = await exportSignerData(aliceEmail, database);
+
+  assert.equal(aliceExport.webhookDeliveries.length, 1);
+  assert.equal(
+    JSON.stringify(aliceExport.webhookDeliveries).includes(bobEmail),
+    false,
+  );
+  assert.equal(
+    JSON.stringify(aliceExport.webhookDeliveries).includes(copyEmail),
+    false,
+  );
+
+  // Export for the copy recipient includes only their copy-recipient record.
+  const copyExport = await exportSignerData(copyEmail, database);
+
+  assert.equal(copyExport.webhookDeliveries.length, 1);
+  assert.equal(
+    JSON.stringify(copyExport.webhookDeliveries).includes(aliceEmail),
+    false,
+  );
+
+  // Delete the shared envelope directly (as retention or scheduled deletion
+  // would), leaving an orphaned webhook delivery containing Alice and Bob.
+  await database.query(`delete from envelopes where id = $1`, [shared.id]);
+
+  // Export still finds the orphaned delivery for Alice before erasure.
+  const orphanedExport = await exportSignerData(aliceEmail, database);
+
+  assert.equal(orphanedExport.envelopes.length, 0);
+  assert.equal(orphanedExport.webhookDeliveries.length, 1);
+
+  // Erasing Alice deletes the orphaned delivery without touching Bob's other
+  // envelope or its deliveries.
+  const erased = await eraseSignerData(aliceEmail, aliceEmail, database);
+
+  assert.equal(erased.deletedEnvelopes, 0);
+  assert.equal(erased.deletedWebhookDeliveries, 1);
+  assert.equal(
+    (await exportSignerData(aliceEmail, database)).webhookDeliveries.length,
+    0,
+  );
+  assert.deepEqual(
+    (await deliveriesFor(endpoint.id)).map((row) =>
+      row.payload?.includes(bobSeparate.id),
+    ),
+    [true],
+  );
+  assert.equal(
+    (await exportSignerData(bobEmail, database)).webhookDeliveries.length,
+    1,
+  );
+
+  // Erasing the owner email (who was never a signer) touches nothing.
+  const ownerErased = await eraseSignerData(admin.email, admin.email, database);
+
+  assert.equal(ownerErased.deletedEnvelopes, 0);
+  assert.equal(ownerErased.deletedWebhookDeliveries, undefined);
+  assert.equal((await deliveriesFor(endpoint.id)).length, 1);
+
+  // Correcting a signer's email leaves a historical delivery naming the old
+  // email; exporting surfaces it and erasing removes it without deleting the
+  // live envelope.
+  const correctedEmail = `bob-new-${randomUUID()}@example.test`;
+
+  await database.query(
+    `update signers set email = $2 where envelope_id = $1 and lower(email) = $3`,
+    [bobSeparate.id, correctedEmail, bobEmail],
+  );
+  assert.equal(
+    (await exportSignerData(bobEmail, database)).webhookDeliveries.length,
+    1,
+  );
+  assert.equal(
+    (await exportSignerData(correctedEmail, database)).webhookDeliveries.length,
+    0,
+  );
+
+  const bobOldErased = await eraseSignerData(bobEmail, bobEmail, database);
+
+  assert.equal(bobOldErased.deletedEnvelopes, 0);
+  assert.equal(bobOldErased.deletedWebhookDeliveries, 1);
+  assert.equal((await deliveriesFor(endpoint.id)).length, 0);
+  assert.equal(
+    (
+      await database.query(`select 1 from envelopes where id = $1`, [
+        bobSeparate.id,
+      ])
+    ).rowCount,
+    1,
+  );
 });

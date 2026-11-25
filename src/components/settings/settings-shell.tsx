@@ -24,7 +24,12 @@ type SettingsShellProps = {
   /** Why this account cannot be closed; shown in place of the button. */
   closureBlockedReason?: string | null;
   initialProfile?: ProfileValues;
-  twoFactor?: { enabled: boolean; required: boolean };
+  twoFactor?: {
+    enabled: boolean;
+    hasPassword?: boolean;
+    required: boolean;
+    ssoProviderName?: string | null;
+  };
 };
 
 type FeedbackTone = "error" | "success";
@@ -166,7 +171,12 @@ function isNoOpEmailChangeMessage(message: string) {
 export function SettingsShell({
   closureBlockedReason = null,
   initialProfile = defaultProfileValues,
-  twoFactor = { enabled: false, required: false },
+  twoFactor = {
+    enabled: false,
+    hasPassword: true,
+    required: false,
+    ssoProviderName: null,
+  },
 }: SettingsShellProps) {
   const closureCopy = useClosureCopy();
   const [profileValues, setProfileValues] = useState(initialProfile);
@@ -665,7 +675,9 @@ export function SettingsShell({
 
           <TwoFactorPanel
             enabled={twoFactor.enabled}
+            hasPassword={twoFactor.hasPassword ?? true}
             required={twoFactor.required}
+            ssoProviderName={twoFactor.ssoProviderName ?? null}
           />
 
           <SessionsPanel />

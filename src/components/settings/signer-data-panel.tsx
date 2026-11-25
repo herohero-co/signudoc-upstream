@@ -9,6 +9,7 @@ import { FieldShell, ShellButton } from "@/components/shared/form-shell";
 
 type ErasureResult = {
   deletedEnvelopes: number;
+  deletedWebhookDeliveries?: number;
   removedFromDrafts: number;
   keptPart11?: { id: string; title: string }[];
   skippedInProgress: { id: string; title: string }[];
@@ -46,6 +47,9 @@ export function SignerDataPanel() {
         return;
       }
 
+      const webhookDeliveries = payload.deletedWebhookDeliveries
+        ? ` Deleted ${String(payload.deletedWebhookDeliveries)} stored webhook ${payload.deletedWebhookDeliveries === 1 ? "delivery" : "deliveries"}.`
+        : "";
       const skipped = payload.skippedInProgress.length
         ? ` ${String(payload.skippedInProgress.length)} envelope(s) still out for signature were left alone: void them first, then erase again.`
         : "";
@@ -54,7 +58,7 @@ export function SignerDataPanel() {
         : "";
 
       setMessage({
-        text: `Deleted ${String(payload.deletedEnvelopes)} finished envelope(s) and removed the signer from ${String(payload.removedFromDrafts)} draft(s).${skipped}${kept}`,
+        text: `Deleted ${String(payload.deletedEnvelopes)} finished envelope(s) and removed the signer from ${String(payload.removedFromDrafts)} draft(s).${webhookDeliveries}${skipped}${kept}`,
         tone: "success",
       });
       setConfirmation("");
@@ -77,9 +81,9 @@ export function SignerDataPanel() {
         <p className="max-w-2xl text-sm leading-6 text-(--secondary)">
           When a signer asks what you hold about them, download it here. When
           they ask for it to be erased, you can delete every finished envelope
-          they signed, with its files and audit trail. Signed records are often
-          ones you must keep, so erase only when no law or open dispute requires
-          them.
+          they signed, with its files, audit trail and stored webhook
+          deliveries. Signed records are often ones you must keep, so erase only
+          when no law or open dispute requires them.
         </p>
       </div>
       <div className="grid max-w-xl gap-4">

@@ -1,9 +1,10 @@
 import type { Metadata } from "next";
-import Link from "next/link";
 
+import { LegalInlineText } from "@/components/layout/legal-inline-text";
 import { PublicDocumentShell } from "@/components/layout/public-document-shell";
 import { requireHostedMode } from "@/lib/hosted-pages";
-import { resolvePublicSupportAddress } from "@/lib/public-contact";
+import { buildLegalContactParts } from "@/lib/legal";
+import { findPublicSupportAddress } from "@/lib/public-contact";
 
 export const metadata: Metadata = {
   description:
@@ -14,7 +15,7 @@ export const metadata: Metadata = {
 export default async function AccessibilityPage() {
   await requireHostedMode();
 
-  const supportAddress = await resolvePublicSupportAddress();
+  const supportAddress = await findPublicSupportAddress();
 
   return (
     <PublicDocumentShell
@@ -90,15 +91,13 @@ export default async function AccessibilityPage() {
           Alternative assistance
         </h2>
         <p>
-          If you need help creating, sending, reviewing, or signing a document,
-          email{" "}
-          <Link
-            className="font-semibold text-(--accent-ink) underline decoration-[rgb(var(--accent-rgb)/0.35)] underline-offset-4"
-            href={`mailto:${supportAddress}`}
-          >
-            {supportAddress}
-          </Link>
-          . Tell us what part of the workflow you are trying to complete, what
+          <LegalInlineText
+            parts={buildLegalContactParts(
+              "accessibility_assistance",
+              supportAddress,
+            )}
+          />{" "}
+          Tell us what part of the workflow you are trying to complete, what
           assistive technology you use if you are comfortable sharing it, and
           what kind of accommodation would help.
         </p>
@@ -131,22 +130,12 @@ export default async function AccessibilityPage() {
           Feedback
         </h2>
         <p>
-          Accessibility feedback helps us prioritize the right fixes. If you
-          find a barrier, email{" "}
-          <Link
-            className="font-semibold text-(--accent-ink) underline decoration-[rgb(var(--accent-rgb)/0.35)] underline-offset-4"
-            href={`mailto:${supportAddress}`}
-          >
-            {supportAddress}
-          </Link>{" "}
-          or use the{" "}
-          <Link
-            className="font-semibold text-(--accent-ink) underline decoration-[rgb(var(--accent-rgb)/0.35)] underline-offset-4"
-            href="/contact"
-          >
-            Contact
-          </Link>{" "}
-          page.
+          <LegalInlineText
+            parts={buildLegalContactParts(
+              "accessibility_feedback",
+              supportAddress,
+            )}
+          />
         </p>
       </section>
     </PublicDocumentShell>

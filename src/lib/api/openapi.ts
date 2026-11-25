@@ -711,7 +711,7 @@ export function buildOpenApiDocument(
           responses: {
             "200": envelopeResponse("The envelope, now voided."),
             "413": errorResponse,
-            ...errors,
+            ...emailErrors,
           },
           summary: "Void a sent envelope",
         },

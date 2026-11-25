@@ -26,6 +26,7 @@ import {
   getSignInLockState,
   MAX_FAILED_SIGN_INS,
   SIGN_IN_LOCKED_MESSAGE,
+  userHasPassword,
 } from "../sign-in-security.ts";
 
 // Puts sign-ins and changes to how people sign in into the install's audit
@@ -43,6 +44,14 @@ const SECOND_STEP_PATHS = new Set([
   "/two-factor/verify-backup-code",
   "/two-factor/verify-otp",
   "/two-factor/verify-totp",
+]);
+
+// Two-step management endpoints that verify the account's password.
+const PASSWORD_TWO_FACTOR_PATHS = new Set([
+  "/two-factor/disable",
+  "/two-factor/enable",
+  "/two-factor/generate-backup-codes",
+  "/two-factor/get-totp-uri",
 ]);
 
 // Paths whose actor is only known before the endpoint runs: each replaces
@@ -298,6 +307,28 @@ export function signInEvents() {
               throw new APIError("TOO_MANY_REQUESTS", {
                 code: "SIGN_IN_LOCKED",
                 message: SIGN_IN_LOCKED_MESSAGE,
+              });
+            }
+          }),
+        },
+        {
+          // Two-step sign-in here protects password sign-in and verifies the
+          // account's password before changing settings. Someone who only signs
+          // in through an identity provider has no password here; refusing
+          // early avoids a misleading "Invalid password" error.
+          matcher: (ctx) => PASSWORD_TWO_FACTOR_PATHS.has(ctx.path ?? ""),
+          handler: createAuthMiddleware(async (ctx) => {
+            const session = await getSessionFromCtx(ctx).catch(() => null);
+
+            if (!session) {
+              return;
+            }
+
+            if (!(await userHasPassword(session.user.id))) {
+              throw new APIError("BAD_REQUEST", {
+                code: "PASSWORD_REQUIRED_FOR_TWO_FACTOR",
+                message:
+                  "This account signs in with single sign-on and has no password here. Two-step sign-in is managed by your identity provider.",
               });
             }
           }),

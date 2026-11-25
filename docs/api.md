@@ -422,7 +422,8 @@ three days before it went down (retries take about two and a half days),
 and skip what it already has by its `webhook-id`. Times are kept to the
 second, so a `since` with a fraction counts from the start of its second.
 Deliveries are kept 30 days after they are delivered, and otherwise 90
-days after their last try or "Send again".
+days after their last try or "Send again", or deleted sooner if a signer
+data erasure removes their envelope.
 
 ### Safety
 
