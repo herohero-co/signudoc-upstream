@@ -6,6 +6,10 @@ import {
   getAddressDomain,
   isResendTestSender,
 } from "./services/email-addresses.ts";
+import {
+  describeMailgunEmail,
+  type MailgunEmailStatus,
+} from "./services/email-mailgun.ts";
 import { resolveEmailDriver } from "./services/email.ts";
 import {
   getSettings,
@@ -63,7 +67,8 @@ export type EmailStatus =
       senderAddress: string;
     }
   | { state: "ready"; domain: string; senderAddress: string }
-  | { state: "error"; message: string; senderAddress: string };
+  | { state: "error"; message: string; senderAddress: string }
+  | Extract<MailgunEmailStatus, { state: "mailgun" }>;
 
 /** The parts of the Resend SDK used here. Replaced by a fake in tests. */
 const RESEND_REGIONS = [
@@ -386,6 +391,23 @@ async function inspectEmail({
       domainId: null,
       markReady: noop,
       status: { state: "capture" },
+    };
+  }
+
+  if (!domainsClient && resolveEmailDriver(env) === "mailgun") {
+    const resolvedSettings = settings ?? (await getSettings(env));
+
+    return {
+      client: null,
+      domainId: null,
+      markReady: noop,
+      status: await describeMailgunEmail({
+        env,
+        markReady:
+          recordReady ??
+          ((ready: boolean) => defaultRecordReady(ready, resolvedSettings)),
+        settings: resolvedSettings,
+      }),
     };
   }
 
