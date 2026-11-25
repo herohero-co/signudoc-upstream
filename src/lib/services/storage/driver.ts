@@ -3,7 +3,7 @@ import { type EnvSource } from "../../utils/env.ts";
 // Which storage the app uses. Kept free of the drivers themselves so the
 // request proxy can ask without loading them.
 
-export type StorageDriver = "blob" | "local";
+export type StorageDriver = "blob" | "gcs" | "local";
 
 /** True when a Vercel Blob store is connected to the project. */
 export function hasBlobCredentials(env: EnvSource = process.env): boolean {
@@ -17,6 +17,7 @@ export function hasBlobCredentials(env: EnvSource = process.env): boolean {
  *   to the project, and always on Vercel, where there is no disk to keep
  *   files on.
  * - "local": files on this machine's disk. The default everywhere else.
+ * - "gcs": a Google Cloud Storage bucket (GCS_BUCKET). Only when asked for.
  *
  * STORAGE_DRIVER overrides the choice.
  */
@@ -25,13 +26,17 @@ export function resolveStorageDriver(
 ): StorageDriver {
   const configuredDriver = env.STORAGE_DRIVER?.trim().toLowerCase();
 
-  if (configuredDriver === "blob" || configuredDriver === "local") {
+  if (
+    configuredDriver === "blob" ||
+    configuredDriver === "gcs" ||
+    configuredDriver === "local"
+  ) {
     return configuredDriver;
   }
 
   if (configuredDriver) {
     throw new Error(
-      `Unknown STORAGE_DRIVER "${configuredDriver}". Use "blob" or "local", or leave it unset.`,
+      `Unknown STORAGE_DRIVER "${configuredDriver}". Use "blob", "gcs" or "local", or leave it unset.`,
     );
   }
 
