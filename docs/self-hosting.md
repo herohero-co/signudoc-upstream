@@ -356,7 +356,7 @@ Away from Vercel, a few things Vercel does for you are yours to set:
 - `APP_URL`, the site's public HTTPS address.
 - `BETTER_AUTH_SECRET`, at least 32 characters (`openssl rand -hex 32`). Without it a secret is derived from the database password, which must then be at least 12 characters long.
 - `RESEND_API_KEY`, from your Resend account.
-- Files are kept on the machine's disk under `.data/storage` (`STORAGE_LOCAL_DIR` changes where), so that disk must survive restarts. To use a Vercel Blob store from elsewhere, set `BLOB_READ_WRITE_TOKEN`.
+- Files are kept on the machine's disk under `.data/storage` (`STORAGE_LOCAL_DIR` changes where), so that disk must survive restarts. To use a Vercel Blob store from elsewhere, set `BLOB_READ_WRITE_TOKEN`. On Google Cloud (Cloud Run, GKE, Compute Engine), set `STORAGE_DRIVER=gcs` and `GCS_BUCKET`, and give the service account the app runs as `roles/storage.objectAdmin` on that private bucket; no key is needed. PDFs are then uploaded through the app, so the host's request size limit applies (32 MB on Cloud Run).
 - Leave `EMAIL_DRIVER` unset. The capture driver is for development only.
 
 Self-hosted operators are responsible for:
